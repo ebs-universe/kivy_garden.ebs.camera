@@ -3,12 +3,12 @@
 from datetime import datetime
 
 from kivy.clock import Clock
-from kivy.properties import BooleanProperty
+from kivy.properties import BooleanProperty, NumericProperty, ListProperty
 
-from kivy.graphics import Color, Rectangle
+from kivy.graphics import Color, Rectangle, Ellipse
 from kivy.graphics.texture import Texture
 
-from kivy.core.text import Label as CoreLabel
+from kivy.uix.widget import Widget
 from kivy.uix.label import Label
 from kivy.uix.image import Image
 
@@ -16,65 +16,34 @@ from kivy.uix.relativelayout import RelativeLayout
 from kivy.uix.stacklayout import StackLayout
 from kivy.uix.anchorlayout import AnchorLayout
 
+from kivy_garden.ebs.core.labels import SelfScalingOneLineLabel
 
-class SelfScalingLabel(Label):
+
+class RecordingIndicator(Widget):
+    recording = BooleanProperty(False)
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.bind(size=lambda inst, val: setattr(inst, 'text_size', val))
-        self._bind_autofit_text()
+        self.size_hint = (None, None)
+        self.size = (140, 50)
+        # blinking timer
+        Clock.schedule_interval(self._blink, 0.5)
+        self._visible = True
 
-    def _bind_autofit_text(self, min_font=10, max_font=None, respect_height=True, timeout_retry=0.05):
-        """
-        Bind label so its font_size auto-scales to ensure the full text fits *in one line* horizontally.
+    def _blink(self, dt):
+        self.canvas.after.clear()
+        if not self.recording:
+            return
+        self._visible = not self._visible
+        if self._visible:
+            with self.canvas.after:
+                Color(1, 0, 0, 1)   # red
+                # Draw a small filled circle (10 px radius)
+                Ellipse(pos=(10, self.y + 20), size=(20, 20))
 
-        - No wrapping, no shortening, no clipping.
-        - Keeps alignment (halign/valign) functional.
-        - Recomputes on size/text change.
-        """
-
-        def _fit_text_size(*_):
-            # Ensure layout exists before computing
-            w, h = self.size
-            if w <= 8 or h <= 8:
-                Clock.schedule_once(lambda dt: _fit_text_size(), timeout_retry)
-                return
-
-            text = self.text or ""
-            if not text.strip():
-                return
-
-            high = max_font if max_font is not None else max(self.font_size, h)
-            low = min_font
-            best = low
-
-            while low <= high:
-                mid = (low + high) // 2
-                core = CoreLabel(
-                    text=text,
-                    font_size=mid,
-                    font_name=getattr(self, "font_name", None),
-                    bold=getattr(self, "bold", False),
-                    markup=getattr(self, "markup", False),
-                )
-                # Do NOT set text_size → no wrapping
-                core.refresh()
-                tex_w, tex_h = core.texture.size
-
-                fits_width = tex_w <= w
-                fits_height = not respect_height or tex_h <= h
-
-                if fits_width and fits_height:
-                    best = mid
-                    low = mid + 1
-                else:
-                    high = mid - 1
-
-            self.font_size = best
-            # text_size should match full size for proper halign/valign (but no wrapping)
-            self.text_size = (w, None)
-
-        self.bind(size=_fit_text_size, text=_fit_text_size)
-        Clock.schedule_once(lambda dt: _fit_text_size(), 0)
+    def on_pos(self, *args):
+        # ensure the circle stays positioned relative to widget
+        self._blink(0)
 
 
 class CameraPreviewWidget(RelativeLayout):
@@ -87,12 +56,19 @@ class CameraPreviewWidget(RelativeLayout):
     show_key = BooleanProperty(True)
     show_path = BooleanProperty(True)
     show_card = BooleanProperty(True)
+    show_crop = BooleanProperty(True)
+    apply_crop = BooleanProperty(False)
+    simplify = BooleanProperty(False)
 
-    preview_running = BooleanProperty(True)
+    run_preview = BooleanProperty(False)
+    errored = BooleanProperty(False)
+    capturing = BooleanProperty(False)
+    aspect_ratio = NumericProperty(4.0/3.0)
+    effective_crop = ListProperty([0, 1, 0, 1])
 
     def __init__(self,
                  camera_key=None, connection_path=None, camera_card=None,
-                 show_key=True, show_path=True, show_card=True, show_ts=True,
+                 control_target=None,
                  **kwargs):
         super().__init__(**kwargs)
 
@@ -102,6 +78,7 @@ class CameraPreviewWidget(RelativeLayout):
         self.camera_key = camera_key or "Unknown"
         self.connection_path = connection_path or "N/A"
         self.camera_card = camera_card or "Unknown"
+        self._control_target = control_target
 
         self._bottom_left_anchor = None
         self._top_right_stack = None
@@ -112,53 +89,47 @@ class CameraPreviewWidget(RelativeLayout):
         self._timestamp_label = None
         self._connection_label = None
         self._card_label = None
+        self._recording_indicator = None
 
         # Main image
         self.preview_image = Image(allow_stretch=True, keep_ratio=True)
         self.add_widget(self.preview_image)
+        self._init_black_texture()
 
         # Overlay
         self._build_overlay()
-
-        self.bind(
-            show_ts=self._remount_overlay,
-            show_key=self._remount_overlay,
-            show_path=self._remount_overlay,
-            show_card=self._remount_overlay
-        )
 
         # Freeze shading overlay
         with self.canvas.after:
             self._freeze_color = Color(0, 0, 0, 0)
             self._freeze_rect = Rectangle(pos=self.pos, size=self.size)
 
-        self.bind(preview_running=self._set_freeze_overlay)
         self.bind(pos=self._update_overlay_geometry,
                   size=self._update_overlay_geometry)
 
-    def _remount_overlay(self, *_):
-        # raise RuntimeError(_)
-        if self.show_key:
-            if not self._alias_label.parent:
-                self._bottom_left_anchor.add_widget(self._alias_label)
-        else:
-            if self._alias_label.parent:
-                self._bottom_left_anchor.remove_widget(self._alias_label)
+        Clock.schedule_once(lambda dt: self._set_freeze_overlay(), 0)
 
-        if self.show_path:
-            if not self._connection_label.parent:
-                self._top_right_stack.add_widget(self._connection_label)
-        else:
-            if self._connection_label.parent:
-                self._top_right_stack.remove_widget(self._connection_label)
+    @property
+    def control_target(self):
+        return self._control_target
 
-        if self.show_card:
-            if not self._card_label.parent:
-                self._top_right_stack.add_widget(self._card_label)
-        else:
-            if self._card_label.parent:
-                self._top_right_stack.remove_widget(self._card_label)
+    def _init_black_texture(self):
+        """Create and assign an initial black texture (for startup)."""
+        from kivy.graphics.texture import Texture
+        import numpy as np
 
+        # Default resolution can be small; will stretch automatically
+        w, h = 320, 240
+        black_frame = np.zeros((h, w, 3), dtype=np.uint8)
+
+        texture = Texture.create(size=(w, h), colorfmt='bgr')
+        texture.blit_buffer(black_frame.tobytes(), colorfmt='bgr', bufferfmt='ubyte')
+        self.preview_image.texture = texture
+
+    def on_capturing(self, *_):
+        self._recording_indicator.recording = self.capturing
+
+    def on_show_ts(self, *_):
         if self.show_ts:
             if not self._timestamp_label.parent:
                 self._bottom_right_stack.add_widget(self._timestamp_label)
@@ -166,12 +137,60 @@ class CameraPreviewWidget(RelativeLayout):
             if self._timestamp_label.parent:
                 self._bottom_right_stack.remove_widget(self._timestamp_label)
 
+    def on_show_key(self, *_):
+        if self.show_key:
+            if not self._alias_label.parent:
+                self._bottom_left_anchor.add_widget(self._alias_label)
+        else:
+            if self._alias_label.parent:
+                self._bottom_left_anchor.remove_widget(self._alias_label)
+
+    def on_show_path(self, *_):
+        if self.show_path:
+            if not self._connection_label.parent:
+                self._top_right_stack.add_widget(self._connection_label)
+        else:
+            if self._connection_label.parent:
+                self._top_right_stack.remove_widget(self._connection_label)
+
+    def on_show_card(self, *_):
+        if self.show_card:
+            if not self._card_label.parent:
+                self._top_right_stack.add_widget(self._card_label)
+        else:
+            if self._card_label.parent:
+                self._top_right_stack.remove_widget(self._card_label)
+
+    def on_simplify(self, *_):
+        self.show_card = False
+        if len(self.connection_path) <= 2:
+            self.show_path = False
+
+    def on_show_crop(self, *_):
+        if self.control_target:
+            self.control_target.preview_overlay_crop = self.show_crop
+
+    def on_apply_crop(self, *_):
+        if self.control_target:
+            self.control_target.preview_apply_crop = self.apply_crop
+
+    def on_run_preview(self, *_):
+        self._set_freeze_overlay()
+
+    def on_errored(self, *_):
+        if self.errored:
+            self._pause_label.text = "[error]"
+            self.run_preview = False
+
     def _build_overlay(self):
         self._bottom_left_anchor = AnchorLayout(anchor_x='left', anchor_y='bottom', padding=10)
         self.add_widget(self._bottom_left_anchor)
 
         top_right_anchor = AnchorLayout(anchor_x='right', anchor_y='top', padding=10)
         self.add_widget(top_right_anchor)
+
+        top_left_anchor = AnchorLayout(anchor_x='left', anchor_y='top', padding=10)
+        self.add_widget(top_left_anchor)
 
         bottom_right_anchor = AnchorLayout(anchor_x='right', anchor_y='bottom', padding=10)
         self.add_widget(bottom_right_anchor)
@@ -182,8 +201,14 @@ class CameraPreviewWidget(RelativeLayout):
         self._bottom_right_stack = StackLayout(orientation='bt-rl')
         bottom_right_anchor.add_widget(self._bottom_right_stack)
 
+        self._recording_indicator = RecordingIndicator(
+            size_hint=(0.2, 0.2),
+            size_hint_max_y=40,
+        )
+        top_left_anchor.add_widget(self._recording_indicator)
+
         if self.camera_key:
-            self._alias_label = SelfScalingLabel(
+            self._alias_label = SelfScalingOneLineLabel(
                 text=self.camera_key,
                 color=(1, 1, 1, 0.9),
                 halign='left',
@@ -193,9 +218,10 @@ class CameraPreviewWidget(RelativeLayout):
                 font_size=90,
                 bold=True,
             )
+        self.on_show_key()
 
         if self.connection_path:
-            self._connection_label = SelfScalingLabel(
+            self._connection_label = SelfScalingOneLineLabel(
                 text=self.connection_path,
                 color=(1, 1, 1, 0.9),
                 halign='right',
@@ -205,9 +231,10 @@ class CameraPreviewWidget(RelativeLayout):
                 font_size=42,
                 bold=True,
             )
+            self.on_show_path()
 
         if self.camera_card:
-            self._card_label = SelfScalingLabel(
+            self._card_label = SelfScalingOneLineLabel(
                 text=self.camera_card,
                 color=(1, 1, 1, 0.9),
                 halign='right',
@@ -216,8 +243,9 @@ class CameraPreviewWidget(RelativeLayout):
                 size_hint_max_y=38,
                 font_size=32,
             )
+            self.on_show_card()
 
-        self._pause_label = SelfScalingLabel(
+        self._pause_label = SelfScalingOneLineLabel(
             text="[paused]",
             color=(1, 1, 1, 0.9),
             halign='right',
@@ -229,7 +257,7 @@ class CameraPreviewWidget(RelativeLayout):
         )
 
         # --- Timestamp label (bottom-right corner) ---
-        self._timestamp_label = SelfScalingLabel(
+        self._timestamp_label = SelfScalingOneLineLabel(
             text="--:--:--.---",
             color=(1, 1, 1, 0.9),
             halign='right',
@@ -239,20 +267,20 @@ class CameraPreviewWidget(RelativeLayout):
             size_hint_max_y=48,
             font_size=42,
         )
-        self._remount_overlay()
+        self.on_show_ts()
 
     def start_preview(self, *_):
-        if self.preview_running:
+        if self.run_preview:
             return
-        self.preview_running = True
+        self.run_preview = True
 
     def stop_preview(self, *_):
-        if not self._preview_running:
+        if not self.run_preview:
             return
-        self.preview_running = False
+        self.run_preview = False
 
     def _set_freeze_overlay(self, *_):
-        if not self.preview_running:
+        if not self.run_preview:
             self._freeze_color.a = 0.4
             if not self._pause_label.parent:
                 self._bottom_right_stack.add_widget(self._pause_label)
@@ -267,7 +295,7 @@ class CameraPreviewWidget(RelativeLayout):
 
     def update_frame(self, frame, timestamp=None):
         """Called externally to provide a new frame (NumPy array)."""
-        if not self.preview_running:
+        if not self.run_preview:
             return
         if self._updating_texture:
             return

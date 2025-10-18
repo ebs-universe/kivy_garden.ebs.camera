@@ -1,7 +1,7 @@
 
-
+from kivy_garden.ebs.core.labels import ColorLabel
 from kivy.clock import Clock
-from kivy.properties import NumericProperty
+from kivy.properties import NumericProperty, ListProperty
 from kivy.properties import BooleanProperty
 
 from kivy.uix.scrollview import ScrollView
@@ -22,17 +22,24 @@ class MultiCameraPreviewWidget(ScrollView):
     spacing = NumericProperty(8)
     padding = NumericProperty(8)
 
+    desired_width = NumericProperty(320)
+
     show_ts = BooleanProperty(True)
     show_key = BooleanProperty(True)
     show_path = BooleanProperty(True)
     show_card = BooleanProperty(True)
-    preview_running = BooleanProperty(True)
+    show_crop = BooleanProperty(True)
+    apply_crop = BooleanProperty(False)
+    simplify = BooleanProperty(False)
 
-    desired_width = NumericProperty(320)
+    run_preview = BooleanProperty(False)
+    enabled_previews = ListProperty([])
 
-    def __init__(self, **kwargs):
+    def __init__(self, control_target=None, actual=None, **kwargs):
         super().__init__(**kwargs)
 
+        self._actual = actual
+        self._control_target = control_target
         self.camera_widgets = {}
 
         self._grid = GridLayout(
@@ -43,10 +50,33 @@ class MultiCameraPreviewWidget(ScrollView):
         )
 
         self._grid.bind(minimum_height=self._grid.setter("height"))
-        self.add_widget(self._grid)
-
         # reflow grid on container resize
         self.bind(size=self._on_resize)
+
+        self._empty_label = ColorLabel(
+            text="No Cameras Detected",
+            color=[1, 1, 1, 1],
+            bgcolor=[1, 0.2, 0.2, 0.7],
+            halign="center",
+            valign="middle",
+            font_size="32sp",
+            size_hint=(1, None),
+            height="52sp",
+        )
+        # ensure text alignment works
+        self._empty_label.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+
+        self.add_widget(self._empty_label)
+        # ensure initial display state is correct
+        Clock.schedule_once(lambda dt: self._update_empty_state(), 0.05)
+
+    @property
+    def control_target(self):
+        return self._control_target
+
+    @property
+    def actual(self):
+        return self._actual
 
     def _propagate_setting(self, name, value):
         for widget in self.camera_widgets.values():
@@ -64,16 +94,32 @@ class MultiCameraPreviewWidget(ScrollView):
     def on_show_card(self, *_):
         self._propagate_setting('show_card', self.show_card)
 
+    def on_show_crop(self, *_):
+        self._propagate_setting('show_crop', self.show_crop)
+
+    def on_apply_crop(self, *_):
+        self._propagate_setting('apply_crop', self.apply_crop)
+
+    def on_simplify(self, *_):
+        self._propagate_setting('simplify', self.simplify)
+
     def on_desired_width(self, *_):
         Clock.schedule_once(lambda dt: self._reflow())
 
-    def on_preview_running(self, *_):
-        self._propagate_setting('preview_running', self.preview_running)
+    def on_run_preview(self, *_):
+        self._propagate_setting('run_preview', self.run_preview)
+
+    def on_enabled_previews(self, _, keys):
+        self._grid.clear_widgets()
+        for key in keys:
+            self._grid.add_widget(self.camera_widgets[key])
+        self._update_empty_state()
+        Clock.schedule_once(lambda dt: self._reflow())
 
     # ------------------------------------------------------------------
     # Camera management
     # ------------------------------------------------------------------
-    def add_camera(self, camera_key, connection_path=None, camera_card=None):
+    def add_camera(self, camera_key, connection_path=None, camera_card=None, control_target=None):
         if camera_key in self.camera_widgets:
             return self.camera_widgets[camera_key]
 
@@ -81,24 +127,40 @@ class MultiCameraPreviewWidget(ScrollView):
             camera_key=camera_key,
             connection_path=connection_path or "N/A",
             camera_card=camera_card or "",
-            size_hint=(None, None),  # will be explicitly sized
+            control_target=control_target,
+            size_hint=(None, None),
         )
-        self._grid.add_widget(widget)
+
         self.camera_widgets[camera_key] = widget
-        Clock.schedule_once(lambda dt: self._reflow())
         return widget
 
     def remove_camera(self, camera_key):
-        widget = self.camera_widgets.pop(camera_key, None)
-        if widget:
-            self._grid.remove_widget(widget)
-        Clock.schedule_once(lambda dt: self._reflow())
+        if camera_key in self.enabled_previews:
+            self.enabled_previews.remove(camera_key)
+        self.camera_widgets.pop(camera_key, None)
 
-    def clear_all(self):
-        for widget in list(self.camera_widgets.values()):
-            self._grid.remove_widget(widget)
-        self.camera_widgets.clear()
-        Clock.schedule_once(lambda dt: self._reflow())
+    # ------------------------------------------------------------------
+    # Internal helpers: swap child of ScrollView between grid and label
+    # ------------------------------------------------------------------
+    def _show_grid(self):
+        if self._grid in self.children:
+            return
+        if self._empty_label in self.children:
+            self.remove_widget(self._empty_label)
+        self.add_widget(self._grid)
+
+    def _show_empty_label(self):
+        if self._empty_label in self.children:
+            return
+        if self._grid in self.children:
+            self.remove_widget(self._grid)
+        self.add_widget(self._empty_label)
+
+    def _update_empty_state(self, *args):
+        if len(self.enabled_previews) == 0:
+            self._show_empty_label()
+        else:
+            self._show_grid()
 
     # ------------------------------------------------------------------
     # Layout logic
@@ -108,8 +170,7 @@ class MultiCameraPreviewWidget(ScrollView):
 
     def _reflow(self, *args):
         """Recalculate grid columns and resize children responsively."""
-
-        n = len(self.camera_widgets)
+        n = len(self.enabled_previews)
         if n == 0:
             return
 
