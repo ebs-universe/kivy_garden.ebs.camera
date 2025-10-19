@@ -1,7 +1,8 @@
 
+
 from kivy_garden.ebs.core.labels import ColorLabel
 from kivy.clock import Clock
-from kivy.properties import NumericProperty, ListProperty
+from kivy.properties import NumericProperty, ListProperty, DictProperty
 from kivy.properties import BooleanProperty
 
 from kivy.uix.scrollview import ScrollView
@@ -34,13 +35,13 @@ class MultiCameraPreviewWidget(ScrollView):
 
     run_preview = BooleanProperty(False)
     enabled_previews = ListProperty([])
+    camera_widgets = DictProperty({})
 
     def __init__(self, control_target=None, actual=None, **kwargs):
         super().__init__(**kwargs)
 
         self._actual = actual
         self._control_target = control_target
-        self.camera_widgets = {}
 
         self._grid = GridLayout(
             cols=1,
@@ -110,6 +111,7 @@ class MultiCameraPreviewWidget(ScrollView):
         self._propagate_setting('run_preview', self.run_preview)
 
     def on_enabled_previews(self, _, keys):
+        # TODO Also apply the new state to the control target
         self._grid.clear_widgets()
         for key in keys:
             self._grid.add_widget(self.camera_widgets[key])
