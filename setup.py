@@ -37,6 +37,7 @@ setup(
     install_requires=[
         'kivy>=1.11.1',
         'kivy_garden.ebs.core',
+        'kivy_garden.ebs.forms',
     ],
     setup_requires=['setuptools_scm'],
     use_scm_version=True,

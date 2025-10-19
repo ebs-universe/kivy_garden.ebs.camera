@@ -15,7 +15,6 @@ from kivy_garden.ebs.core.panels import ExpansionPanel
 from kivy_garden.ebs.core.colors import ColorBoxLayout
 
 
-
 class CameraSelector(ColorBoxLayout):
     alias = StringProperty()
     cam_info = DictProperty()
